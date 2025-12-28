@@ -1,9 +1,5 @@
 # DeckMaster – interactive due-date triage for Taskwarrior
 
-```bash
-curl -LO https://raw.githubusercontent.com/catanadj/taskwarrior-deckmaster/main/DeckMaster.py
-chmod +x DeckMaster.py
-```
 
 ## What it does
 - Shows **today / yesterday / overdue** tasks **one-by-one** in rich panels  
@@ -18,11 +14,23 @@ chmod +x DeckMaster.py
 - Time-zone aware, emoji age-indicators, optional duration / value / CP fields  
 - Dry-run feel: nothing is executed until you confirm; Ctrl-C leaves your DB untouched  
 
+## Install
+Python ≥ 3.8  
+```bash
+pip install rich dateutil pytz      # required
+pip install questionary             # optional (nicer batch UI)
+```
+---
+
 ## Usage
 ```bash
 ./deckmaster.py              # today (default)
 ./deckmaster.py overdue      # blaze through backlog (short use "o")
 ./deckmaster.py yesterday -b # batch-process what slipped (short "y")
+```
+```bash
+curl -LO https://raw.githubusercontent.com/catanadj/taskwarrior-deckmaster/main/DeckMaster.py
+chmod +x DeckMaster.py
 ```
 
 ## Keys
@@ -37,13 +45,7 @@ chmod +x DeckMaster.py
 | `s` | skip |
 | `q` | quit |
 
-## Install
-Python ≥ 3.8  
-```bash
-pip install rich dateutil pytz      # required
-pip install questionary             # optional (nicer batch UI)
-```
----
+
 
 ## Support
 
