@@ -26,6 +26,10 @@ Python ≥ 3.8
 pip install rich dateutil pytz      # required
 pip install questionary             # optional (nicer batch UI)
 ```
+```bash
+curl -LO https://raw.githubusercontent.com/catanadj/taskwarrior-deckmaster/main/DeckMaster.py
+chmod +x DeckMaster.py
+```
 ---
 
 ## Usage
@@ -34,10 +38,7 @@ pip install questionary             # optional (nicer batch UI)
 ./deckmaster.py overdue      # blaze through backlog (short use "o")
 ./deckmaster.py yesterday -b # batch-process what slipped (short "y")
 ```
-```bash
-curl -LO https://raw.githubusercontent.com/catanadj/taskwarrior-deckmaster/main/DeckMaster.py
-chmod +x DeckMaster.py
-```
+
 
 ## Keys
 | Key | Action |
