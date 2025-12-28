@@ -1,6 +1,12 @@
 # DeckMaster – interactive due-date triage for Taskwarrior
 
 
+## When to use
+- End-of-day shutdown – clear today's list and push leftovers to tomorrow in < 60 s
+- Weekly GTD review – run `deckmaster o`, bulk-select everything that can wait, hit 7 and you're done
+- Morning stand-up – refresh, complete what shipped overnight, reschedule blockers
+- Inbox zero – import e-mail tasks, blast through them with single keys
+
 ## What it does
 - Shows **today / yesterday / overdue** tasks **one-by-one** in rich panels  
 - Single-key actions:  
