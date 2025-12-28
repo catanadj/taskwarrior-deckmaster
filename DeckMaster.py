@@ -1238,24 +1238,33 @@ def main():
 
             # Custom due date/time
             cmd = f"task {task.get('uuid','')} modify due:{shlex.quote(user_input)}"
-            if _run_task_action_bool(cmd, interactive=False, title="🚨 Failed to set custom due"):
-                if uuid:
-                    updated = fetch_task_by_uuid(uuid) or {}
-                    session_mark(session_state, uuid, "updated", new_due=_format_due_compact(updated))
+            try:
+                if _run_task_action_bool(cmd, interactive=False, title="🚨 Failed to set custom due"):
+                    if uuid:
+                        updated = fetch_task_by_uuid(uuid) or {}
+                        session_mark(session_state, uuid, "updated", new_due=_format_due_compact(updated))
 
-                success_text = Text()
-                success_text.append("✅ ", style="bold green")
-                success_text.append(f"{task.get('id', '')}:", style="bold")
-                success_text.append(f" '{task.get('description','')}'", style="cyan")
-                success_text.append("\n📅 Due date set to: ", style="bold")
-                success_text.append(f"{user_input}", style="bold green")
+                    success_text = Text()
+                    success_text.append("✅ ", style="bold green")
+                    success_text.append(f"{task.get('id', '')}:", style="bold")
+                    success_text.append(f" '{task.get('description','')}'", style="cyan")
+                    success_text.append("\n📅 Due date set to: ", style="bold")
+                    success_text.append(f"{user_input}", style="bold green")
 
-                console.print(Panel.fit(success_text, border_style="green", padding=(1, 2)))
-                task_processed = True
-                current_index += 1
-                console.clear()
-                if current_index < len(tasks):
-                    display_header(len(tasks), display_time_frame, session_order, session_state)
+                    console.print(Panel.fit(success_text, border_style="green", padding=(1, 2)))
+                    task_processed = True
+                    current_index += 1
+                    console.clear()
+                    if current_index < len(tasks):
+                        display_header(len(tasks), display_time_frame, session_order, session_state)
+            except (TaskwarriorError, AbortRequested):
+                console.print(Panel.fit(
+                    f"[yellow]⚠️ Invalid due date format: '{user_input}'[/yellow]\n"
+                    "[dim]💡 Try formats like: today, tomorrow, 2024-12-30, +3d, etc.[/dim]",
+                    border_style="yellow",
+                    padding=(1, 2)
+                ))
+                # Don't mark as processed - let user try again
             else:
                 console.print("[yellow]⚠️ Please try again with a different date format.[/yellow]")
 
