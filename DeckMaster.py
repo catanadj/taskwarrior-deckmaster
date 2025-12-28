@@ -362,11 +362,6 @@ def refresh_session(time_frame: str, current_tasks: List[Dict], session_order: L
         return _tw_export(filter_expr)
 
 
-def _run_task_action_bool(cmd, interactive=True, title="🚨 Task action failed"):
-    """Backward-compatible wrapper (raises TaskwarriorError on failure)."""
-    _task(cmd, interactive=interactive)
-    return True
-
 
 def modify_due_date(task, days_to_add):
     """Modify the due date of a task with improved logic for old tasks."""
@@ -1089,6 +1084,37 @@ def display_header(task_count, time_frame_name, session_order: Optional[List[str
     console.print()
     console.print(create_action_panel())
     console.print()
+
+def handle_custom_due_date(task, user_input, uuid, session_state, session_order):
+    """Handle custom due date input with proper error handling."""
+    cmd = f"task {task.get('uuid','')} modify due:{shlex.quote(user_input)}"
+    try:
+        if _run_task_action_bool(cmd, interactive=False, title="🚨 Failed to set custom due"):
+            if uuid:
+                updated = fetch_task_by_uuid(uuid) or {}
+                session_mark(session_state, uuid, "updated", new_due=_format_due_compact(updated))
+
+            success_text = Text()
+            success_text.append("✅ ", style="bold green")
+            success_text.append(f"{task.get('id', '')}:", style="bold")
+            success_text.append(f" '{task.get('description','')}'", style="cyan")
+            success_text.append("\n📅 Due date set to: ", style="bold")
+            success_text.append(f"{user_input}", style="bold green")
+
+            console.print(Panel.fit(success_text, border_style="green", padding=(1, 2)))
+            return True  # Task processed successfully
+    except AbortRequested:
+        raise  # Let this propagate up
+    except TaskwarriorError as e:
+        console.print(Panel.fit(
+            f"[yellow]⚠️ Invalid due date format: '{user_input}'[/yellow]\n"
+            "[dim]💡 Try formats like: today, tomorrow, 2024-12-30, +3d, etc.[/dim]",
+            border_style="yellow",
+            padding=(1, 2)
+        ))
+        return False  # Task not processed, allow retry
+
+
 def main():
     # Print fancy header
     header = Text()
@@ -1187,7 +1213,7 @@ def main():
                 break
 
             if user_input_low == "s":
-                console.print("[dim]⭐ Skipping...[/dim]")
+                console.print("[dim]⏭ Skipping...[/dim]")
                 if uuid:
                     session_mark(session_state, uuid, "skipped", new_due=session_state.get(uuid, {}).get("old_due"))
                 task_processed = True
@@ -1227,8 +1253,12 @@ def main():
                 days_to_add = int(user_input_low)
                 if modify_due_date(task, days_to_add):
                     if uuid:
-                        updated = fetch_task_by_uuid(uuid) or {}
-                        session_mark(session_state, uuid, "updated", new_due=_format_due_compact(updated))
+                        # FIX #6: Fetch the updated task and replace in tasks list
+                        updated_task = fetch_task_by_uuid(uuid)
+                        if updated_task:
+                            tasks[current_index] = updated_task
+                            task = updated_task  # Update current reference
+                        session_mark(session_state, uuid, "updated", new_due=_format_due_compact(updated_task or task))
                     task_processed = True
                     current_index += 1
                     console.clear()
@@ -1236,37 +1266,22 @@ def main():
                         display_header(len(tasks), display_time_frame, session_order, session_state)
                 continue
 
-            # Custom due date/time
-            cmd = f"task {task.get('uuid','')} modify due:{shlex.quote(user_input)}"
-            try:
-                if _run_task_action_bool(cmd, interactive=False, title="🚨 Failed to set custom due"):
-                    if uuid:
-                        updated = fetch_task_by_uuid(uuid) or {}
-                        session_mark(session_state, uuid, "updated", new_due=_format_due_compact(updated))
-
-                    success_text = Text()
-                    success_text.append("✅ ", style="bold green")
-                    success_text.append(f"{task.get('id', '')}:", style="bold")
-                    success_text.append(f" '{task.get('description','')}'", style="cyan")
-                    success_text.append("\n📅 Due date set to: ", style="bold")
-                    success_text.append(f"{user_input}", style="bold green")
-
-                    console.print(Panel.fit(success_text, border_style="green", padding=(1, 2)))
-                    task_processed = True
-                    current_index += 1
-                    console.clear()
-                    if current_index < len(tasks):
-                        display_header(len(tasks), display_time_frame, session_order, session_state)
-            except (TaskwarriorError, AbortRequested):
-                console.print(Panel.fit(
-                    f"[yellow]⚠️ Invalid due date format: '{user_input}'[/yellow]\n"
-                    "[dim]💡 Try formats like: today, tomorrow, 2024-12-30, +3d, etc.[/dim]",
-                    border_style="yellow",
-                    padding=(1, 2)
-                ))
-                # Don't mark as processed - let user try again
+            # Custom due date/time with proper error handling
+            if handle_custom_due_date(task, user_input, uuid, session_state, session_order):
+                if uuid:
+                    # FIX #6: Fetch the updated task and replace in tasks list
+                    updated_task = fetch_task_by_uuid(uuid)
+                    if updated_task:
+                        tasks[current_index] = updated_task
+                        task = updated_task  # Update current reference
+                task_processed = True
+                current_index += 1
+                console.clear()
+                if current_index < len(tasks):
+                    display_header(len(tasks), display_time_frame, session_order, session_state)
             else:
-                console.print("[yellow]⚠️ Please try again with a different date format.[/yellow]")
+                # Error was shown, let user try again
+                console.print()
 
             console.print()
 
