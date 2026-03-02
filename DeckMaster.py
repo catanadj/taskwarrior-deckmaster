@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 import json
-import os
 import subprocess
 import shlex
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
 import pytz
 from rich.console import Console, Group
@@ -28,6 +27,9 @@ except ImportError:  # pragma: no cover
     Choice = None
 
 console = Console()
+TaskCmd = Union[str, List[str], Tuple[str, ...]]
+
+
 class TaskwarriorError(RuntimeError):
     """Raised when a Taskwarrior command fails."""
 
@@ -43,13 +45,26 @@ class AbortRequested(RuntimeError):
     """Raised when the user requests abort after a failed command."""
 
 
-def _task(cmd: str, *, interactive: bool = False) -> str:
+def _normalize_task_cmd(cmd: TaskCmd) -> Tuple[List[str], str]:
+    if isinstance(cmd, str):
+        return shlex.split(cmd), cmd
+    args = [str(part) for part in cmd]
+    rendered = " ".join(shlex.quote(part) for part in args)
+    return args, rendered
+
+
+def _render_task_cmd(cmd: TaskCmd) -> str:
+    _, rendered = _normalize_task_cmd(cmd)
+    return rendered
+
+
+def _task(cmd: TaskCmd, *, interactive: bool = False) -> str:
     """Run a Taskwarrior command.
 
     - Raises TaskwarriorError on non-zero exit status.
     - Returns stdout for non-interactive calls; returns '' for interactive calls.
     """
-    args = shlex.split(cmd)
+    args, cmd_display = _normalize_task_cmd(cmd)
     try:
         if interactive:
             res = subprocess.run(args)
@@ -58,10 +73,10 @@ def _task(cmd: str, *, interactive: bool = False) -> str:
             res = subprocess.run(args, capture_output=True, text=True)
             stdout, stderr = res.stdout or "", res.stderr or ""
     except FileNotFoundError as e:
-        raise TaskwarriorError(cmd, 127, "", str(e)) from e
+        raise TaskwarriorError(cmd_display, 127, "", str(e)) from e
 
     if res.returncode != 0:
-        raise TaskwarriorError(cmd, res.returncode, stdout, stderr)
+        raise TaskwarriorError(cmd_display, res.returncode, stdout, stderr)
 
     return stdout
 
@@ -99,7 +114,7 @@ def _extract_json_payload(text: str) -> str:
 def _tw_export(filter_expr: str) -> List[Dict]:
     """Export tasks or return empty list on any error."""
     try:
-        out = _task(f"task {filter_expr} export", interactive=False)
+        out = _task(["task", *shlex.split(filter_expr), "export"], interactive=False)
         payload = _extract_json_payload(out)
         data = json.loads(payload) or []
         return data if isinstance(data, list) else []
@@ -133,7 +148,7 @@ def _prompt_on_task_error(err: TaskwarriorError, *, title: str = "🚨 Taskwarri
     return choice.lower().strip()
 
 
-def _run_task_action(cmd: str, *, interactive: bool, title: str) -> None:
+def _run_task_action(cmd: TaskCmd, *, interactive: bool, title: str) -> None:
     """Run a command, prompting for retry/skip/abort on failure."""
     while True:
         try:
@@ -150,7 +165,7 @@ def _run_task_action(cmd: str, *, interactive: bool, title: str) -> None:
 
 
 
-def _run_task_action_bool(cmd: str, *, interactive: bool, title: str) -> bool:
+def _run_task_action_bool(cmd: TaskCmd, *, interactive: bool, title: str) -> bool:
     """Run a command with retry/skip/abort prompts; return True on success, False on skip."""
     try:
         _run_task_action(cmd, interactive=interactive, title=title)
@@ -161,7 +176,7 @@ def _run_task_action_bool(cmd: str, *, interactive: bool, title: str) -> bool:
         return False
 
 
-def _try_task(cmd: str, *, interactive: bool = False) -> bool:
+def _try_task(cmd: TaskCmd, *, interactive: bool = False) -> bool:
     """Best-effort command runner (no prompts)."""
     try:
         _task(cmd, interactive=interactive)
@@ -225,27 +240,22 @@ def _filter_expr_for_time_frame(time_frame: str) -> str:
 
 def _tw_export_checked(filter_expr: str) -> List[Dict]:
     """Export tasks; raise TaskwarriorError / JSONDecodeError on failure."""
-    out = _task(f"task {filter_expr} export", interactive=False)
+    out = _task(["task", *shlex.split(filter_expr), "export"], interactive=False)
     payload = _extract_json_payload(out)
     data = json.loads(payload) or []
     return data if isinstance(data, list) else []
 
 
 def get_tasks(time_frame="today"):
-    """Get tasks based on the specified time frame (best-effort, returns [] on errors)."""
+    """Get tasks based on the specified time frame; raise on export/parse failures."""
     console.print("", end="")  # Add some space
 
     with console.status(
         f"[bold blue]🔍 Fetching {time_frame} tasks from Taskwarrior...[/bold blue]",
         spinner="dots",
     ):
-        try:
-            filter_expr = _filter_expr_for_time_frame(time_frame)
-        except ValueError as e:
-            console.print(f"[bold red]✖ {e}[/bold red]")
-            sys.exit(1)
-
-        return _tw_export(filter_expr)
+        filter_expr = _filter_expr_for_time_frame(time_frame)
+        return _tw_export_checked(filter_expr)
 
 
 def _get_tasks_checked(time_frame: str) -> List[Dict]:
@@ -280,13 +290,11 @@ def refresh_session(time_frame: str, current_tasks: List[Dict], session_order: L
         return current_tasks
 
     export_map: Dict[str, Dict] = {}
-    export_uuids = set()
     for t in exported:
         u = (t.get("uuid") or "").strip()
         if not u:
             continue
         export_map[u] = t
-        export_uuids.add(u)
 
     # Track changes
     newly_added = 0
@@ -335,6 +343,7 @@ def refresh_session(time_frame: str, current_tasks: List[Dict], session_order: L
 
     console.print(Panel.fit(
         f"[bold]Pending in view:[/bold] [bold cyan]{len(pending_tasks)}[/bold cyan]  "
+        f"[bold]Updated:[/bold] [cyan]{updated_in_view}[/cyan]  "
         f"[bold]New:[/bold] [green]{newly_added}[/green]  "
         f"[bold]Removed:[/bold] [yellow]{removed_from_view}[/yellow]",
         title="🔄 Refreshed",
@@ -343,23 +352,6 @@ def refresh_session(time_frame: str, current_tasks: List[Dict], session_order: L
     ))
 
     return pending_tasks
-
-
-    with console.status(
-        f"[bold blue]🔍 Fetching {time_frame} tasks from Taskwarrior...[/bold blue]",
-        spinner="dots",
-    ):
-        if time_frame in ["today", "t"]:
-            filter_expr = "due:today status:pending"
-        elif time_frame in ["yesterday", "y"]:
-            filter_expr = "due:yesterday status:pending"
-        elif time_frame in ["overdue", "o"]:
-            filter_expr = "+OVERDUE status:pending"
-        else:
-            console.print(f"[bold red]✖ Invalid time frame: {time_frame}[/bold red]")
-            sys.exit(1)
-
-        return _tw_export(filter_expr)
 
 
 
@@ -427,9 +419,9 @@ def modify_due_date(task, days_to_add):
 
     # Execute command and show output
     uuid = task["uuid"]
-    cmd = f"task {uuid} modify due:{new_due_str}"
+    cmd = ["task", uuid, "modify", f"due:{new_due_str}"]
 
-    console.print(f"[dim]🔧 Executing: {cmd}[/dim]")
+    console.print(f"[dim]🔧 Executing: {_render_task_cmd(cmd)}[/dim]")
 
     try:
         _run_task_action(cmd, interactive=True, title="🚨 Failed to update task")
@@ -499,9 +491,9 @@ def complete_task(task, annotation=None):
         if is_due_today:
             # Skip date picker for tasks due today
             if annotation:
-                cmd = f"task {task_uuid} done \"{annotation}\""
+                cmd = ["task", task_uuid, "done", annotation]
             else:
-                cmd = f"task {task_uuid} done"
+                cmd = ["task", task_uuid, "done"]
             success = _run_task_action_bool(cmd, interactive=True, title="🚨 Task action failed")
             if success:
                 success_text = Text()
@@ -538,28 +530,28 @@ def complete_task(task, annotation=None):
                     else:
                         end_date_str = due_date.strftime("%Y-%m-%d")
                     if annotation:
-                        cmd = f"task {task_uuid} done end:{end_date_str} \"{annotation}\""
+                        cmd = ["task", task_uuid, "done", f"end:{end_date_str}", annotation]
                     else:
-                        cmd = f"task {task_uuid} done end:{end_date_str}"
+                        cmd = ["task", task_uuid, "done", f"end:{end_date_str}"]
                     completion_date_display = local_due.strftime("%Y-%m-%d")
                 
                 # Special case for "today" - no end date needed
                 elif end_date_input.lower() == "today":
                     if annotation:
-                        cmd = f"task {task_uuid} done \"{annotation}\""
+                        cmd = ["task", task_uuid, "done", annotation]
                     else:
-                        cmd = f"task {task_uuid} done"
+                        cmd = ["task", task_uuid, "done"]
                     completion_date_display = local_now.strftime("%Y-%m-%d")
                 
                 # For any other input, let taskwarrior evaluate it
                 else:
                     if annotation:
-                        cmd = f"task {task_uuid} done end:{end_date_input} \"{annotation}\""
+                        cmd = ["task", task_uuid, "done", f"end:{end_date_input}", annotation]
                     else:
-                        cmd = f"task {task_uuid} done end:{end_date_input}"
+                        cmd = ["task", task_uuid, "done", f"end:{end_date_input}"]
                     completion_date_display = end_date_input
 
-                console.print(f"[dim]🔧 Executing: {cmd}[/dim]")
+                console.print(f"[dim]🔧 Executing: {_render_task_cmd(cmd)}[/dim]")
                 success = _run_task_action_bool(cmd, interactive=True, title="🚨 Task action failed")
                 
                 if success:
@@ -582,9 +574,9 @@ def complete_task(task, annotation=None):
     else:
         # No due date - complete normally
         if annotation:
-            cmd = f"task {task_uuid} done \"{annotation}\""
+            cmd = ["task", task_uuid, "done", annotation]
         else:
-            cmd = f"task {task_uuid} done"
+            cmd = ["task", task_uuid, "done"]
         success = _run_task_action_bool(cmd, interactive=True, title="🚨 Task action failed")
         if success:
             success_text = Text()
@@ -618,8 +610,8 @@ def delete_task(task):
 
     console.print(Panel(info_text, border_style="yellow", padding=(1, 2)))
 
-    cmd = f"task {task_uuid} delete"
-    console.print(f"[dim]🔧 Executing: {cmd}[/dim]")
+    cmd = ["task", task_uuid, "delete"]
+    console.print(f"[dim]🔧 Executing: {_render_task_cmd(cmd)}[/dim]")
 
     success = _run_task_action_bool(cmd, interactive=True, title="🚨 Task action failed")
     if success:
@@ -710,7 +702,10 @@ def display_task(task, task_num, total_tasks):
         header.append(" ")
         header.append_text(Text.from_markup(format_priority(priority)))
     if value:
-        header.append(f" [{value:.2f}]", style="dim")  # Format value to 2 decimal places
+        try:
+            header.append(f" [{float(value):.2f}]", style="dim")
+        except (TypeError, ValueError):
+            header.append(f" [{value}]", style="dim")
 
     # Create main content table
     content_table = Table(show_header=False, box=None, padding=(0, 1), show_edge=False)
@@ -937,7 +932,7 @@ def modify_due_date_quiet(task: Dict, days_to_add: int) -> Tuple[bool, Optional[
     if not uuid:
         return False, None
 
-    ok = _try_task(f"task {uuid} modify due:{new_due_str}", interactive=False)
+    ok = _try_task(["task", uuid, "modify", f"due:{new_due_str}"], interactive=False)
     if not ok:
         return False, None
 
@@ -949,7 +944,7 @@ def set_custom_due_quiet(task: Dict, due_spec: str) -> Tuple[bool, Optional[str]
     uuid = task.get("uuid", "")
     if not uuid:
         return False, None
-    ok = _try_task(f"task {uuid} modify due:{due_spec}", interactive=False)
+    ok = _try_task(["task", uuid, "modify", f"due:{due_spec}"], interactive=False)
     if not ok:
         return False, None
     updated = fetch_task_by_uuid(uuid) or {}
@@ -961,8 +956,9 @@ def complete_task_quick(task: Dict, annotation: Optional[str] = None, end_spec: 
     uuid = task.get("uuid", "")
     if not uuid:
         return False
-    ann = f" {shlex.quote(annotation)}" if annotation else ""
-    cmd = f"task {uuid} done end:{end_spec}{ann}"
+    cmd = ["task", uuid, "done", f"end:{end_spec}"]
+    if annotation:
+        cmd.append(annotation)
     return _try_task(cmd, interactive=False)
 
 
@@ -971,7 +967,7 @@ def delete_task_quick(task: Dict) -> bool:
     uuid = task.get("uuid", "")
     if not uuid:
         return False
-    cmd = f"task rc.confirmation=no {uuid} delete"
+    cmd = ["task", "rc.confirmation=no", uuid, "delete"]
     return _try_task(cmd, interactive=False)
 
 
@@ -1049,9 +1045,6 @@ def run_batch_mode(
         if act_low.isdigit():
             ok, new_due = modify_due_date_quiet(t, int(act_low))
             session_mark(session_state, uuid, "updated" if ok else "error", new_due=new_due)
-        elif act_low == "0":
-            ok, new_due = modify_due_date_quiet(t, 0)
-            session_mark(session_state, uuid, "updated" if ok else "error", new_due=new_due)
         elif act_low == "c" or act_low.startswith("c "):
             note = act[2:].strip() if act_low.startswith("c ") else None
             ok = complete_task_quick(t, annotation=note, end_spec="today")
@@ -1085,9 +1078,13 @@ def display_header(task_count, time_frame_name, session_order: Optional[List[str
     console.print(create_action_panel())
     console.print()
 
-def handle_custom_due_date(task, user_input, uuid, session_state, session_order):
+def handle_custom_due_date(task, user_input, uuid, session_state):
     """Handle custom due date input with proper error handling."""
-    cmd = f"task {task.get('uuid','')} modify due:{shlex.quote(user_input)}"
+    task_uuid = task.get("uuid", "")
+    if not task_uuid:
+        return False
+
+    cmd = ["task", task_uuid, "modify", f"due:{user_input}"]
     try:
         if _run_task_action_bool(cmd, interactive=False, title="🚨 Failed to set custom due"):
             if uuid:
@@ -1105,14 +1102,14 @@ def handle_custom_due_date(task, user_input, uuid, session_state, session_order)
             return True  # Task processed successfully
     except AbortRequested:
         raise  # Let this propagate up
-    except TaskwarriorError as e:
-        console.print(Panel.fit(
-            f"[yellow]⚠️ Invalid due date format: '{user_input}'[/yellow]\n"
-            "[dim]💡 Try formats like: today, tomorrow, 2024-12-30, +3d, etc.[/dim]",
-            border_style="yellow",
-            padding=(1, 2)
-        ))
-        return False  # Task not processed, allow retry
+
+    console.print(Panel.fit(
+        f"[yellow]⚠️ Invalid due date format: '{user_input}'[/yellow]\n"
+        "[dim]💡 Try formats like: today, tomorrow, 2024-12-30, +3d, etc.[/dim]",
+        border_style="yellow",
+        padding=(1, 2)
+    ))
+    return False  # Task not processed, allow retry
 
 
 def main():
@@ -1152,7 +1149,28 @@ def main():
 
     display_time_frame = {"t": "today", "y": "yesterday", "o": "overdue"}.get(time_frame, time_frame)
 
-    tasks = get_tasks(time_frame)
+    try:
+        tasks = get_tasks(time_frame)
+    except TaskwarriorError as e:
+        details = (e.stderr or e.stdout or str(e)).strip()
+        console.print(Panel.fit(
+            f"[red]✖ Failed to fetch tasks from Taskwarrior.[/red]\n"
+            f"[dim]Command: {e.cmd}[/dim]\n"
+            f"[dim]{details}[/dim]",
+            border_style="red",
+            padding=(1, 2),
+            title="🚨 Startup error",
+        ))
+        sys.exit(2)
+    except (json.JSONDecodeError, ValueError) as e:
+        console.print(Panel.fit(
+            f"[red]✖ Failed to parse Taskwarrior export output.[/red]\n"
+            f"[dim]{e}[/dim]",
+            border_style="red",
+            padding=(1, 2),
+            title="🚨 Startup error",
+        ))
+        sys.exit(2)
 
     if not tasks:
         no_tasks_text = Text()
@@ -1267,7 +1285,7 @@ def main():
                 continue
 
             # Custom due date/time with proper error handling
-            if handle_custom_due_date(task, user_input, uuid, session_state, session_order):
+            if handle_custom_due_date(task, user_input, uuid, session_state):
                 if uuid:
                     # FIX #6: Fetch the updated task and replace in tasks list
                     updated_task = fetch_task_by_uuid(uuid)
