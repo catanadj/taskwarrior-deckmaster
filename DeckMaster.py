@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import subprocess
 import shlex
 import sys
@@ -28,6 +29,86 @@ except ImportError:  # pragma: no cover
 
 console = Console()
 TaskCmd = Union[str, List[str], Tuple[str, ...]]
+
+
+THEME_PRESETS = {
+    "default": {
+        "text": "",
+        "accent": "cyan",
+        "accent_bold": "bold cyan",
+        "id": "bold cyan",
+    },
+    "dark": {
+        "text": "white",
+        "accent": "cyan",
+        "accent_bold": "bold cyan",
+        "id": "bold cyan",
+    },
+    "light": {
+        "text": "",
+        "accent": "bold black",
+        "accent_bold": "bold blue",
+        "id": "bold blue",
+    },
+}
+ACTIVE_THEME = "default"
+
+
+def set_theme(theme_name: str) -> None:
+    """Select the active terminal color preset."""
+    global ACTIVE_THEME
+    normalized = (theme_name or "default").strip().lower()
+    if normalized in ("auto", "neutral"):
+        normalized = "default"
+    if normalized not in THEME_PRESETS:
+        raise ValueError(f"Unknown theme: {theme_name}")
+    ACTIVE_THEME = normalized
+
+
+def theme_style(name: str) -> str:
+    return THEME_PRESETS[ACTIVE_THEME].get(name, "")
+
+
+def theme_markup(name: str, value: object) -> str:
+    style = theme_style(name)
+    text = str(value)
+    return f"[{style}]{text}[/]" if style else text
+
+
+def config_paths() -> List[str]:
+    """Return config files in read priority order."""
+    override = os.environ.get("DECKMASTER_CONFIG")
+    if override:
+        return [os.path.expanduser(override)]
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return [os.path.join(script_dir, "deckmaster.conf")]
+
+
+def load_config() -> Dict[str, str]:
+    """Load a tiny key=value config file."""
+    for path in config_paths():
+        if not os.path.exists(path):
+            continue
+
+        config: Dict[str, str] = {}
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                config[key.strip().lower()] = value.strip().strip("\"'")
+        return config
+
+    return {}
+
+
+def apply_config() -> None:
+    config = load_config()
+    theme = config.get("theme")
+    if theme:
+        set_theme(theme)
 
 
 class TaskwarriorError(RuntimeError):
@@ -342,8 +423,8 @@ def refresh_session(time_frame: str, current_tasks: List[Dict], session_order: L
             pending_tasks.append(t)
 
     console.print(Panel.fit(
-        f"[bold]Pending in view:[/bold] [bold cyan]{len(pending_tasks)}[/bold cyan]  "
-        f"[bold]Updated:[/bold] [cyan]{updated_in_view}[/cyan]  "
+        f"[bold]Pending in view:[/bold] {theme_markup('accent_bold', len(pending_tasks))}  "
+        f"[bold]Updated:[/bold] {theme_markup('accent', updated_in_view)}  "
         f"[bold]New:[/bold] [green]{newly_added}[/green]  "
         f"[bold]Removed:[/bold] [yellow]{removed_from_view}[/yellow]",
         title="🔄 Refreshed",
@@ -443,7 +524,7 @@ def modify_due_date(task, days_to_add):
     success_text = Text()
     success_text.append("✅ ", style="bold green")
     success_text.append(f"{task.get('id', '')}:", style="bold")
-    success_text.append(f" '{task['description']}'", style="cyan")
+    success_text.append(f" '{task['description']}'", style=theme_style("accent"))
 
     date_text = Text()
     date_text.append("📅 Due date: ", style="bold")
@@ -499,7 +580,7 @@ def complete_task(task, annotation=None):
                 success_text = Text()
                 success_text.append("✅ ", style="bold green")
                 success_text.append(f"{task_id}:", style="bold")
-                success_text.append(f" '{description}'", style="cyan")
+                success_text.append(f" '{description}'", style=theme_style("accent"))
                 success_text.append("\n🎉 ", style="bold green")
                 success_text.append("Marked as complete", style="green")
                 if annotation:
@@ -514,7 +595,7 @@ def complete_task(task, annotation=None):
                 prompt_text.append("📅 Task was due: ", style="dim")
                 prompt_text.append(local_due.strftime("%Y-%m-%d"), style="yellow")
                 prompt_text.append(" | Complete it on: ", style="dim")
-                prompt_text.append("[due/today/yest/tomorrow/YYYY-MM-DD/any taskwarrior date]", style="bold cyan")
+                prompt_text.append("[due/today/yest/tomorrow/YYYY-MM-DD/any taskwarrior date]", style=theme_style("accent_bold"))
 
                 console.print(prompt_text)
 
@@ -558,7 +639,7 @@ def complete_task(task, annotation=None):
                     success_text = Text()
                     success_text.append("✅ ", style="bold green")
                     success_text.append(f"{task_id}:", style="bold")
-                    success_text.append(f" '{description}'", style="cyan")
+                    success_text.append(f" '{description}'", style=theme_style("accent"))
                     success_text.append("\n🎉 ", style="bold green")
                     success_text.append("Marked as complete", style="green")
                     success_text.append(f"\n📅 Completion date: {completion_date_display}", style="dim")
@@ -582,7 +663,7 @@ def complete_task(task, annotation=None):
             success_text = Text()
             success_text.append("✅ ", style="bold green")
             success_text.append(f"{task_id}:", style="bold")
-            success_text.append(f" '{description}'", style="cyan")
+            success_text.append(f" '{description}'", style=theme_style("accent"))
             success_text.append("\n🎉 ", style="bold green")
             success_text.append("Marked as complete", style="green")
             if annotation:
@@ -606,7 +687,7 @@ def delete_task(task):
     info_text = Text()
     info_text.append("🗑️ Deleting task ", style="yellow")
     info_text.append(f"#{task_id}", style="bold")
-    info_text.append(f": '{description}'", style="cyan")
+    info_text.append(f": '{description}'", style=theme_style("accent"))
 
     console.print(Panel(info_text, border_style="yellow", padding=(1, 2)))
 
@@ -697,7 +778,7 @@ def display_task(task, task_num, total_tasks):
     # Create header with task number and progress
     header = Text()
     header.append(f"📋 Task {task_num}/{total_tasks} ", style="bold blue")
-    header.append(f"#{task_id}", style="bold cyan")
+    header.append(f"#{task_id}", style=theme_style("id"))
     if priority:
         header.append(" ")
         header.append_text(Text.from_markup(format_priority(priority)))
@@ -712,7 +793,7 @@ def display_task(task, task_num, total_tasks):
     content_table.add_column("Label", style="bold dim", width=12)
     content_table.add_column("Value", style="")
 
-    content_table.add_row("📝 Task:", f"[cyan]{description}[/cyan]")
+    content_table.add_row("📝 Task:", Text(description, style=theme_style("text")))
     content_table.add_row(f"{age_indicator} Due:", f"[yellow]{due_display}[/yellow]")
 
     # Add additional fields if they exist
@@ -747,8 +828,8 @@ def display_help():
 
     # Commands table
     commands_table = Table(title="🎯 Time Frame Commands", box=box.ROUNDED, title_style="bold green")
-    commands_table.add_column("Command", style="bold cyan", width=15)
-    commands_table.add_column("Description", style="white")
+    commands_table.add_column("Command", style=theme_style("accent_bold"), width=15)
+    commands_table.add_column("Description", style=theme_style("text"))
 
     commands_table.add_row("today, t", "Process tasks due today (default)")
     commands_table.add_row("yesterday, y", "Process tasks due yesterday")
@@ -756,8 +837,8 @@ def display_help():
 
     # Actions table
     actions_table = Table(title="⚡ Available Actions", box=box.ROUNDED, title_style="bold green")
-    actions_table.add_column("Action", style="bold cyan", width=15)
-    actions_table.add_column("Description", style="white")
+    actions_table.add_column("Action", style=theme_style("accent_bold"), width=15)
+    actions_table.add_column("Description", style=theme_style("text"))
 
     actions_table.add_row("number", "Days to push the task forward")
     actions_table.add_row("0", "Set the task to be due today")
@@ -783,12 +864,19 @@ def display_help():
     note.append("For tasks older than yesterday, the default '1' will set due date to tomorrow (today + 1), not original due date + 1")
     console.print(Panel(note, border_style="yellow"))
 
+    config_table = Table(title="⚙ Configuration", box=box.ROUNDED, title_style="bold green")
+    config_table.add_column("File", style=theme_style("accent_bold"))
+    config_table.add_column("Setting", style=theme_style("text"))
+    config_table.add_row("deckmaster.conf", 'theme = "default" | "dark" | "light"')
+    console.print()
+    console.print(config_table)
+
 def create_action_panel():
     """Create a compact action reference panel."""
     action_table = Table.grid(padding=(0, 2))
-    action_table.add_column(style="bold cyan", justify="center")
+    action_table.add_column(style=theme_style("accent_bold"), justify="center")
     action_table.add_column(style="dim")
-    action_table.add_column(style="bold cyan", justify="center")
+    action_table.add_column(style=theme_style("accent_bold"), justify="center")
     action_table.add_column(style="dim")
 
     action_table.add_row("0-9", "days", "c", "complete")
@@ -847,8 +935,8 @@ def session_mark(state: Dict[str, Dict], task_uuid: str, status: str, new_due: O
 def build_queue_table(order: List[str], state: Dict[str, Dict]) -> Table:
     table = Table(box=box.SIMPLE, show_header=True, expand=False, pad_edge=False)
     table.add_column(" ", width=2, no_wrap=True)
-    table.add_column("ID", style="bold cyan", justify="right", no_wrap=True)
-    table.add_column("Task", style="white")
+    table.add_column("ID", style=theme_style("id"), justify="right", no_wrap=True)
+    table.add_column("Task", style=theme_style("text"))
     table.add_column("Due", justify="right", no_wrap=True)
 
     for uuid in order:
@@ -1063,7 +1151,7 @@ def display_header(task_count, time_frame_name, session_order: Optional[List[str
     """Display the header information (auto-sized)."""
     summary_text = Text()
     summary_text.append("📊 Found ", style="bold")
-    summary_text.append(f"{task_count}", style="bold cyan")
+    summary_text.append(f"{task_count}", style=theme_style("accent_bold"))
     summary_text.append(" pending tasks for: ", style="bold")
     summary_text.append(time_frame_name, style="bold blue")
 
@@ -1094,7 +1182,7 @@ def handle_custom_due_date(task, user_input, uuid, session_state):
             success_text = Text()
             success_text.append("✅ ", style="bold green")
             success_text.append(f"{task.get('id', '')}:", style="bold")
-            success_text.append(f" '{task.get('description','')}'", style="cyan")
+            success_text.append(f" '{task.get('description','')}'", style=theme_style("accent"))
             success_text.append("\n📅 Due date set to: ", style="bold")
             success_text.append(f"{user_input}", style="bold green")
 
@@ -1113,6 +1201,17 @@ def handle_custom_due_date(task, user_input, uuid, session_state):
 
 
 def main():
+    try:
+        apply_config()
+    except ValueError as e:
+        console.print(Panel.fit(
+            f"[yellow]{e}[/yellow]\n"
+            '[dim]Use theme = "default", "dark", or "light". Falling back to default.[/dim]',
+            border_style="yellow",
+            padding=(1, 2),
+            title="⚙ Configuration warning",
+        ))
+
     # Print fancy header
     header = Text()
     header.append("🚀 ", style="bold blue")

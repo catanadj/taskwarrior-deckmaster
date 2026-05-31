@@ -39,6 +39,21 @@ chmod +x DeckMaster.py
 ./deckmaster.py yesterday -b # batch-process what slipped (short "y")
 ```
 
+## Configuration
+DeckMaster reads a small key/value config file named `deckmaster.conf` from the same directory as `DeckMaster.py`.
+
+```ini
+theme = "default"  # terminal foreground, works on light and dark backgrounds
+```
+
+Available themes:
+
+| Theme | Use |
+|-------|-----|
+| `default` | Inherit normal text from the terminal foreground |
+| `dark` | Keep the original white/cyan-heavy styling |
+| `light` | Use darker accents for light terminal backgrounds |
+
 
 ## Keys
 | Key | Action |
