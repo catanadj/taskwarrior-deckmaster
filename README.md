@@ -44,7 +44,14 @@ DeckMaster reads a small key/value config file named `deckmaster.conf` from the 
 
 ```ini
 theme = "default"  # terminal foreground, works on light and dark backgrounds
+default_view = "today"
+default_action = "1"
+batch_default_action = "1"
+show_session_summary = true
 ```
+
+Run `./deckmaster.py --help` to see the active theme and loaded config path.
+Run `./deckmaster.py --doctor` for read-only setup diagnostics.
 
 Available themes:
 
@@ -53,6 +60,15 @@ Available themes:
 | `default` | Inherit normal text from the terminal foreground |
 | `dark` | Keep the original white/cyan-heavy styling |
 | `light` | Use darker accents for light terminal backgrounds |
+
+Config options:
+
+| Setting | Use |
+|---------|-----|
+| `default_view` | View to open when no view is passed: `today`, `yesterday`, or `overdue` |
+| `default_action` | Default action for the per-task prompt |
+| `batch_default_action` | Default action for batch mode |
+| `show_session_summary` | Show updated/completed/deleted/skipped/remaining counts at exit |
 
 
 ## Keys
@@ -64,6 +80,7 @@ Available themes:
 | `d` | delete |
 | `b` | batch multi-select |
 | `r` | refresh queue |
+| `u` | undo last interactive action |
 | `s` | skip |
 | `q` | quit |
 

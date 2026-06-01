@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import shlex
+import shutil
 import sys
 from typing import Dict, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
@@ -17,7 +18,7 @@ from rich.text import Text
 from rich.align import Align
 
 
-# Version 1.0 2025-12-28
+# Version 1.1 2026-05-31
 
 # Optional dependency used for interactive batch selection (checkbox UI)
 try:
@@ -52,6 +53,7 @@ THEME_PRESETS = {
     },
 }
 ACTIVE_THEME = "default"
+CONFIG: Dict[str, str] = {}
 
 
 def set_theme(theme_name: str) -> None:
@@ -67,6 +69,10 @@ def set_theme(theme_name: str) -> None:
 
 def theme_style(name: str) -> str:
     return THEME_PRESETS[ACTIVE_THEME].get(name, "")
+
+
+def theme_name() -> str:
+    return ACTIVE_THEME
 
 
 def theme_markup(name: str, value: object) -> str:
@@ -105,10 +111,26 @@ def load_config() -> Dict[str, str]:
 
 
 def apply_config() -> None:
-    config = load_config()
-    theme = config.get("theme")
+    global CONFIG
+    CONFIG = load_config()
+    theme = CONFIG.get("theme") or CONFIG.get("color") or CONFIG.get("colour")
     if theme:
         set_theme(theme)
+
+
+def config_value(name: str, default: str = "") -> str:
+    return CONFIG.get(name, default)
+
+
+def config_bool(name: str, default: bool = False) -> bool:
+    raw = CONFIG.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def active_config_path() -> str:
+    return config_paths()[0]
 
 
 class TaskwarriorError(RuntimeError):
@@ -257,6 +279,13 @@ def _run_task_action_bool(cmd: TaskCmd, *, interactive: bool, title: str) -> boo
         return False
 
 
+def task_error_summary(err: TaskwarriorError) -> str:
+    details = (err.stderr or err.stdout or "").strip()
+    if details:
+        return details.splitlines()[0]
+    return f"exit {err.returncode}"
+
+
 def _try_task(cmd: TaskCmd, *, interactive: bool = False) -> bool:
     """Best-effort command runner (no prompts)."""
     try:
@@ -317,6 +346,20 @@ def _filter_expr_for_time_frame(time_frame: str) -> str:
     if tf in ["overdue", "o"]:
         return "+OVERDUE status:pending"
     raise ValueError(f"Invalid time frame: {time_frame}")
+
+
+def normalize_time_frame(time_frame: str) -> str:
+    tf = (time_frame or "today").lower().strip()
+    aliases = {"t": "today", "y": "yesterday", "o": "overdue"}
+    return aliases.get(tf, tf)
+
+
+def valid_time_frame(time_frame: str) -> bool:
+    try:
+        _filter_expr_for_time_frame(time_frame)
+        return True
+    except ValueError:
+        return False
 
 
 def _tw_export_checked(filter_expr: str) -> List[Dict]:
@@ -834,6 +877,8 @@ def display_help():
     commands_table.add_row("today, t", "Process tasks due today (default)")
     commands_table.add_row("yesterday, y", "Process tasks due yesterday")
     commands_table.add_row("overdue, o", "Process all overdue tasks")
+    commands_table.add_row("doctor", "Show read-only setup diagnostics")
+    commands_table.add_row("--doctor", "Show read-only setup diagnostics")
 
     # Actions table
     actions_table = Table(title="⚡ Available Actions", box=box.ROUNDED, title_style="bold green")
@@ -847,6 +892,7 @@ def display_help():
     actions_table.add_row("d", "Delete the task 🗑️")
     actions_table.add_row("b", "Batch mode (checkbox multi-select)")
     actions_table.add_row("r", "Refresh tasks in view 🔄")
+    actions_table.add_row("u", "Undo the last interactive action")
     actions_table.add_row("s", "Skip this task ⭐")
     actions_table.add_row("q", "Quit the program 🚪")
     actions_table.add_row("Enter", "Default to 1 day forward")
@@ -868,6 +914,12 @@ def display_help():
     config_table.add_column("File", style=theme_style("accent_bold"))
     config_table.add_column("Setting", style=theme_style("text"))
     config_table.add_row("deckmaster.conf", 'theme = "default" | "dark" | "light"')
+    config_table.add_row("default_view", '"today" | "yesterday" | "overdue"')
+    config_table.add_row("default_action", '"0" through "9" or custom due date')
+    config_table.add_row("batch_default_action", '"0" through "9" or custom due date')
+    config_table.add_row("show_session_summary", '"true" | "false"')
+    config_table.add_row("Active theme", theme_name())
+    config_table.add_row("Loaded path", active_config_path())
     console.print()
     console.print(config_table)
 
@@ -882,7 +934,8 @@ def create_action_panel():
     action_table.add_row("0-9", "days", "c", "complete")
     action_table.add_row("c <note>", "w/ note", "s", "skip")
     action_table.add_row("d", "delete", "b", "batch")
-    action_table.add_row("r", "refresh", "q", "quit")
+    action_table.add_row("r", "refresh", "u", "undo")
+    action_table.add_row("q", "quit", " ", " ")
     action_table.add_row("Enter", "→ tomorrow", " ", " ")
 
     return Panel.fit(action_table, title="⚡ Quick Actions", border_style="dim", padding=(1, 2))
@@ -932,6 +985,76 @@ def session_mark(state: Dict[str, Dict], task_uuid: str, status: str, new_due: O
         state[task_uuid]["new_due"] = new_due
 
 
+def make_undo_record(
+    action: str,
+    task: Dict,
+    index: int,
+    session_state: Dict[str, Dict],
+    *,
+    task_undo: bool = True,
+) -> Dict:
+    uuid = task.get("uuid", "")
+    return {
+        "action": action,
+        "uuid": uuid,
+        "index": index,
+        "task": dict(task),
+        "session": dict(session_state.get(uuid, {})) if uuid else {},
+        "task_undo": task_undo,
+    }
+
+
+def restore_task_in_list(tasks: List[Dict], task: Dict, preferred_index: int) -> int:
+    uuid = task.get("uuid", "")
+    if uuid:
+        for i, existing in enumerate(tasks):
+            if existing.get("uuid") == uuid:
+                tasks[i] = task
+                return i
+
+    index = min(max(preferred_index, 0), len(tasks))
+    tasks.insert(index, task)
+    return index
+
+
+def undo_last_action(undo_stack: List[Dict], tasks: List[Dict], session_state: Dict[str, Dict]) -> Optional[int]:
+    if not undo_stack:
+        console.print(Panel.fit("[yellow]Nothing to undo.[/yellow]", border_style="yellow", padding=(1, 2)))
+        return None
+
+    undo = undo_stack[-1]
+    if undo.get("task_undo", True):
+        try:
+            _run_task_action(["task", "undo"], interactive=True, title="🚨 Undo failed")
+        except AbortRequested:
+            raise
+        except TaskwarriorError as e:
+            console.print(Panel.fit(
+                f"[red]Could not undo the last action.[/red]\n[dim]{task_error_summary(e)}[/dim]",
+                border_style="red",
+                padding=(1, 2),
+            ))
+            return None
+
+    undo_stack.pop()
+    uuid = undo.get("uuid", "")
+    previous_session = undo.get("session") or {}
+    if uuid and previous_session:
+        session_state[uuid] = dict(previous_session)
+
+    restored_task = fetch_task_by_uuid(uuid) if uuid else None
+    if not restored_task:
+        restored_task = dict(undo.get("task") or {})
+
+    restored_index = restore_task_in_list(tasks, restored_task, int(undo.get("index", 0)))
+    console.print(Panel.fit(
+        f"[green]Undid {undo.get('action', 'last action')}.[/green]",
+        border_style="green",
+        padding=(1, 2),
+    ))
+    return restored_index
+
+
 def build_queue_table(order: List[str], state: Dict[str, Dict]) -> Table:
     table = Table(box=box.SIMPLE, show_header=True, expand=False, pad_edge=False)
     table.add_column(" ", width=2, no_wrap=True)
@@ -966,6 +1089,70 @@ def build_queue_table(order: List[str], state: Dict[str, Dict]) -> Table:
         table.add_row(mark, item.get("id", ""), item.get("desc", ""), due)
 
     return table
+
+
+def session_counts(session_state: Dict[str, Dict]) -> Dict[str, int]:
+    counts = {
+        "pending": 0,
+        "updated": 0,
+        "completed": 0,
+        "deleted": 0,
+        "skipped": 0,
+        "error": 0,
+    }
+    for item in session_state.values():
+        status = item.get("status", "pending")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def display_session_summary(session_state: Dict[str, Dict], title: str = "📊 Session summary") -> None:
+    if not config_bool("show_session_summary", True) or not session_state:
+        return
+
+    counts = session_counts(session_state)
+    table = Table(box=box.SIMPLE, show_header=False, expand=False)
+    table.add_column("Status", style="bold")
+    table.add_column("Count", justify="right", style=theme_style("accent_bold"))
+    table.add_row("Updated", str(counts.get("updated", 0)))
+    table.add_row("Completed", str(counts.get("completed", 0)))
+    table.add_row("Deleted", str(counts.get("deleted", 0)))
+    table.add_row("Skipped", str(counts.get("skipped", 0)))
+    table.add_row("Errors", str(counts.get("error", 0)))
+    table.add_row("Remaining", str(counts.get("pending", 0)))
+    console.print(Panel.fit(table, title=title, border_style="blue", padding=(1, 2)))
+
+
+def display_doctor() -> None:
+    """Show read-only setup diagnostics."""
+    table = Table(title="🩺 DeckMaster doctor", box=box.ROUNDED, title_style="bold green")
+    table.add_column("Check", style="bold")
+    table.add_column("Result", style=theme_style("text"))
+
+    config_exists = os.path.exists(active_config_path())
+    table.add_row("Config path", active_config_path())
+    table.add_row("Config file", "[green]found[/green]" if config_exists else "[yellow]missing[/yellow]")
+    table.add_row("Active theme", theme_name())
+    table.add_row("Default view", normalize_time_frame(config_value("default_view", "today")))
+    table.add_row("Default action", config_value("default_action", "1"))
+    table.add_row("Batch default action", config_value("batch_default_action", config_value("default_action", "1")))
+    table.add_row("Session summary", "enabled" if config_bool("show_session_summary", True) else "disabled")
+
+    task_path = shutil.which("task")
+    table.add_row("Taskwarrior", task_path or "[red]not found[/red]")
+    table.add_row("questionary", "available" if questionary is not None else "[yellow]missing; batch mode disabled[/yellow]")
+
+    if task_path:
+        for view in ("today", "yesterday", "overdue"):
+            try:
+                count = len(_tw_export_checked(_filter_expr_for_time_frame(view)))
+                table.add_row(f"Pending {view}", str(count))
+            except TaskwarriorError as e:
+                table.add_row(f"Pending {view}", f"[red]error: {task_error_summary(e)}[/red]")
+            except (json.JSONDecodeError, ValueError) as e:
+                table.add_row(f"Pending {view}", f"[red]error: {e}[/red]")
+
+    console.print(table)
 
 
 def modify_due_date_quiet(task: Dict, days_to_add: int) -> Tuple[bool, Optional[str]]:
@@ -1114,7 +1301,7 @@ def run_batch_mode(
 
     action = Prompt.ask(
         "[bold]Batch action[/bold] (0, 1-9, c, c <note>, d, or custom due)",
-        default="1",
+        default=config_value("batch_default_action", config_value("default_action", "1")),
     ).strip()
 
     if not Confirm.ask(f"Apply '{action}' to {len(selected_uuids)} task(s)?", default=False):
@@ -1227,6 +1414,9 @@ def main():
     if argv and argv[0] in ["-h", "--help", "help"]:
         display_help()
         return
+    if argv and argv[0] in ["--doctor", "doctor"]:
+        display_doctor()
+        return
 
     # Parse args: timeframe + optional batch flag(s)
     start_batch = False
@@ -1236,17 +1426,28 @@ def main():
             start_batch = True
             args = [a for a in args if a != flag]
 
-    time_frame = "today"
+    configured_view = normalize_time_frame(config_value("default_view", "today"))
+    if not valid_time_frame(configured_view):
+        console.print(Panel.fit(
+            f"[yellow]Invalid default_view in deckmaster.conf: {configured_view}[/yellow]\n"
+            '[dim]Use "today", "yesterday", or "overdue". Falling back to today.[/dim]',
+            border_style="yellow",
+            padding=(1, 2),
+            title="⚙ Configuration warning",
+        ))
+        configured_view = "today"
+
+    time_frame = configured_view
     if args:
         arg = args[0].lower()
         if arg in ["today", "t", "yesterday", "y", "overdue", "o"]:
-            time_frame = arg
+            time_frame = normalize_time_frame(arg)
         else:
             console.print(Panel.fit(f"[bold red]✖ Invalid argument: {args[0]}[/bold red]", border_style="red", padding=(1, 2)))
             display_help()
             sys.exit(1)
 
-    display_time_frame = {"t": "today", "y": "yesterday", "o": "overdue"}.get(time_frame, time_frame)
+    display_time_frame = normalize_time_frame(time_frame)
 
     try:
         tasks = get_tasks(time_frame)
@@ -1280,6 +1481,7 @@ def main():
         return
 
     session_order, session_state = init_session_queue(tasks)
+    undo_stack: List[Dict] = []
 
     current_index = 0
     console.clear()
@@ -1287,6 +1489,7 @@ def main():
 
     if start_batch:
         current_index = run_batch_mode(tasks, current_index, session_order, session_state)
+        undo_stack.clear()
         console.clear()
         display_header(len(tasks), display_time_frame, session_order, session_state)
 
@@ -1305,17 +1508,19 @@ def main():
 
             user_input = Prompt.ask(
                 "[bold]⚡ Action (or custom due date)[/bold]",
-                default="1"
+                default=config_value("default_action", "1")
             ).strip()
 
             user_input_low = user_input.lower()
 
             if user_input_low == "q":
                 console.print(Panel.fit("[yellow]👋 Goodbye! Exiting program...[/yellow]", border_style="yellow", padding=(1, 2)))
+                display_session_summary(session_state)
                 return
 
             if user_input_low == "b":
                 current_index = run_batch_mode(tasks, current_index, session_order, session_state)
+                undo_stack.clear()
                 console.clear()
                 display_header(len(tasks), display_time_frame, session_order, session_state)
                 task_processed = True
@@ -1323,15 +1528,26 @@ def main():
 
             if user_input_low in ("r", "refresh"):
                 tasks = refresh_session(time_frame, tasks, session_order, session_state)
+                undo_stack.clear()
                 current_index = 0
                 console.clear()
                 display_header(len(tasks), display_time_frame, session_order, session_state)
                 task_processed = True
                 break
 
+            if user_input_low in ("u", "undo"):
+                restored_index = undo_last_action(undo_stack, tasks, session_state)
+                if restored_index is not None:
+                    current_index = restored_index
+                    console.clear()
+                    display_header(len(tasks), display_time_frame, session_order, session_state)
+                    task_processed = True
+                continue
+
             if user_input_low == "s":
                 console.print("[dim]⏭ Skipping...[/dim]")
                 if uuid:
+                    undo_stack.append(make_undo_record("skip", task, current_index, session_state, task_undo=False))
                     session_mark(session_state, uuid, "skipped", new_due=session_state.get(uuid, {}).get("old_due"))
                 task_processed = True
                 current_index += 1
@@ -1347,6 +1563,7 @@ def main():
 
                 if complete_task(task, annotation):
                     if uuid:
+                        undo_stack.append(make_undo_record("complete", task, current_index, session_state))
                         session_mark(session_state, uuid, "completed", new_due="completed")
                     task_processed = True
                     current_index += 1
@@ -1358,6 +1575,7 @@ def main():
             if user_input_low == "d":
                 if delete_task(task):
                     if uuid:
+                        undo_stack.append(make_undo_record("delete", task, current_index, session_state))
                         session_mark(session_state, uuid, "deleted", new_due="deleted")
                     task_processed = True
                     current_index += 1
@@ -1370,6 +1588,7 @@ def main():
                 days_to_add = int(user_input_low)
                 if modify_due_date(task, days_to_add):
                     if uuid:
+                        undo_stack.append(make_undo_record("reschedule", task, current_index, session_state))
                         # FIX #6: Fetch the updated task and replace in tasks list
                         updated_task = fetch_task_by_uuid(uuid)
                         if updated_task:
@@ -1384,8 +1603,11 @@ def main():
                 continue
 
             # Custom due date/time with proper error handling
+            custom_undo = make_undo_record("custom due date", task, current_index, session_state) if uuid else None
             if handle_custom_due_date(task, user_input, uuid, session_state):
                 if uuid:
+                    if custom_undo:
+                        undo_stack.append(custom_undo)
                     # FIX #6: Fetch the updated task and replace in tasks list
                     updated_task = fetch_task_by_uuid(uuid)
                     if updated_task:
@@ -1408,6 +1630,7 @@ def main():
     celebration.append("\nGreat job staying organized!", style="green")
 
     console.print(Panel.fit(celebration, border_style="green", padding=(2, 4)))
+    display_session_summary(session_state)
 
 
 if __name__ == "__main__":
